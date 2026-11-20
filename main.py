@@ -6,9 +6,13 @@ Grid codes: 0 = wall, 1 = path, 2 = start, 3 = end, 4 = highlighted shortest pat
 import heapq
 
 WALL, PATH, START, END, ROUTE = 0, 1, 2, 3, 4
-DIRS = [(-1, 0), (1, 0), (0, -1), (0, 1)]  # up, down, left, right
+DIRECTIONS = [(-1, 0), (1, 0), (0, -1), (0, 1)]  # up, down, left, right
 
-# ANSI background colors per cell value (two spaces = one roughly square cell)
+CORRIDOR_OPEN_SIDES = 2  # a straight corridor or a bend has exactly this many open neighbours
+MOVE_COST = 1            # cost of moving one cell
+CELL_TEXT = "  "         # two spaces = one roughly square cell
+
+# ANSI background colors per cell value
 COLORS = {
     WALL: "\033[40m",    # black
     PATH: "\033[47m",    # white
@@ -30,95 +34,116 @@ class Node:
         return f"Node{self.pos}"
 
 
-def walkable(grid, r, c):
-    return 0 <= r < len(grid) and 0 <= c < len(grid[0]) and grid[r][c] != WALL
+def walkable(grid, row, col):
+    return 0 <= row < len(grid) and 0 <= col < len(grid[0]) and grid[row][col] != WALL
 
 
-def is_node(grid, r, c):
+def is_node(grid, row, col):
     """Start/end are always nodes. Otherwise a cell is a node if it is a bend
     or junction, i.e. its open neighbours are not exactly a straight-through pair.
-    Dead ends (1 open neighbour) are skipped: they can never be on a shortest path."""
-    if grid[r][c] in (START, END):
+    Dead ends (too few open neighbours) are skipped: they can never be on a shortest path."""
+    if grid[row][col] in (START, END):
         return True
-    open_dirs = [d for d in DIRS if walkable(grid, r + d[0], c + d[1])]
-    if len(open_dirs) < 2:
+    open_directions = [
+        direction for direction in DIRECTIONS
+        if walkable(grid, row + direction[0], col + direction[1])
+    ]
+    if len(open_directions) < CORRIDOR_OPEN_SIDES:
         return False
-    if len(open_dirs) == 2:
-        (a, b) = open_dirs
-        return not (a[0] == -b[0] and a[1] == -b[1])  # bend if not opposite
+    if len(open_directions) == CORRIDOR_OPEN_SIDES:
+        (first_row, first_col), (second_row, second_col) = open_directions
+        return not (first_row == -second_row and first_col == -second_col)  # bend if not opposite
     return True  # 3 or 4 neighbours: junction
 
 
 def build_graph(grid):
     """Convert grid into a graph. Returns (nodes dict pos->Node, start Node, end Node)."""
     nodes, start, end = {}, None, None
-    for r in range(len(grid)):
-        for c in range(len(grid[0])):
-            if walkable(grid, r, c) and is_node(grid, r, c):
-                nodes[(r, c)] = Node(r, c)
-                if grid[r][c] == START:
-                    start = nodes[(r, c)]
-                elif grid[r][c] == END:
-                    end = nodes[(r, c)]
+    for row in range(len(grid)):
+        for col in range(len(grid[0])):
+            if walkable(grid, row, col) and is_node(grid, row, col):
+                nodes[(row, col)] = Node(row, col)
+                if grid[row][col] == START:
+                    start = nodes[(row, col)]
+                elif grid[row][col] == END:
+                    end = nodes[(row, col)]
 
     # Edges: from each node, walk in a straight line until we hit another node or a wall.
-    for (r, c), node in nodes.items():
-        for dr, dc in DIRS:
-            cr, cc, steps = r + dr, c + dc, 1
-            while walkable(grid, cr, cc):
-                if (cr, cc) in nodes:
-                    node.edges[nodes[(cr, cc)]] = steps
+    for (row, col), node in nodes.items():
+        for row_step, col_step in DIRECTIONS:
+            scan_row, scan_col, steps = row + row_step, col + col_step, MOVE_COST
+            while walkable(grid, scan_row, scan_col):
+                if (scan_row, scan_col) in nodes:
+                    node.edges[nodes[(scan_row, scan_col)]] = steps
                     break
-                cr, cc, steps = cr + dr, cc + dc, steps + 1
+                scan_row, scan_col = scan_row + row_step, scan_col + col_step
+                steps += MOVE_COST
     return nodes, start, end
 
 
-def dijkstra(start, end):
-    """Standard Dijkstra. Returns list of Nodes from start to end, or None."""
-    dist = {start: 0}
-    prev = {}
-    counter = 0  # tie-breaker so heapq never compares Node objects
-    heap = [(0, counter, start)]
-    done = set()
-    while heap:
-        d, _, node = heapq.heappop(heap)
-        if node in done:
+INFINITY = float("inf")
+
+
+def dijkstra(graph, start):
+    """Find the shortest distance from start to every node in the graph.
+
+    graph: dict mapping position -> Node (as returned by build_graph)
+    start: the Node to measure from
+
+    Returns two dicts, both keyed by position:
+      distances: shortest known distance from start (INFINITY if unreachable)
+      previous:  the position we came from on the shortest route to each node
+    """
+    distances = {position: INFINITY for position in graph}
+    previous = {}
+
+    distances[start.pos] = 0
+    queue = [(0, start.pos)]  # (distance, position), smallest distance pops first
+
+    while queue:
+        distance, position = heapq.heappop(queue)
+
+        # A shorter route to this node was already found, so skip this old entry
+        if distance > distances[position]:
             continue
-        done.add(node)
-        if node is end:
-            break
-        for nbr, w in node.edges.items():
-            nd = d + w
-            if nd < dist.get(nbr, float("inf")):
-                dist[nbr] = nd
-                prev[nbr] = node
-                counter += 1
-                heapq.heappush(heap, (nd, counter, nbr))
-    if end not in dist:
-        return None
-    path, cur = [end], end
-    while cur is not start:
-        cur = prev[cur]
-        path.append(cur)
-    return path[::-1]
+
+        for neighbor, weight in graph[position].edges.items():
+            new_distance = distance + weight
+            if new_distance < distances[neighbor.pos]:
+                distances[neighbor.pos] = new_distance
+                previous[neighbor.pos] = position
+                heapq.heappush(queue, (new_distance, neighbor.pos))
+
+    return distances, previous
+
+
+def build_path(graph, previous, start, end):
+    """Follow the 'previous' links backwards from end to start, then flip the result."""
+    position = end.pos
+    path = [graph[position]]
+    while position != start.pos:
+        position = previous[position]
+        path.append(graph[position])
+    path.reverse()
+    return path
 
 
 def highlight_path(grid, path):
-    """Return a copy of the grid with every cell along the path edges set to 4
+    """Return a copy of the grid with every cell along the path edges set to ROUTE
     (start and end cells keep their own colors)."""
-    out = [row[:] for row in grid]
-    for a, b in zip(path, path[1:]):
-        (r1, c1), (r2, c2) = a.pos, b.pos
-        dr = (r2 > r1) - (r2 < r1)
-        dc = (c2 > c1) - (c2 < c1)
-        r, c = r1, c1
-        while (r, c) != (r2, c2):
-            if out[r][c] == PATH:
-                out[r][c] = ROUTE
-            r, c = r + dr, c + dc
-        if out[r2][c2] == PATH:
-            out[r2][c2] = ROUTE
-    return out
+    highlighted = [row[:] for row in grid]
+    for from_node, to_node in zip(path, path[1:]):
+        (from_row, from_col), (to_row, to_col) = from_node.pos, to_node.pos
+        row_step = (to_row > from_row) - (to_row < from_row)
+        col_step = (to_col > from_col) - (to_col < from_col)
+        row, col = from_row, from_col
+        while (row, col) != (to_row, to_col):
+            if highlighted[row][col] == PATH:
+                highlighted[row][col] = ROUTE
+            row, col = row + row_step, col + col_step
+        if highlighted[to_row][to_col] == PATH:
+            highlighted[to_row][to_col] = ROUTE
+    return highlighted
 
 
 def print_maze(grid):
@@ -126,7 +151,7 @@ def print_maze(grid):
     Works standalone: no solving, just display."""
     print()
     for row in grid:
-        print("".join(f"{COLORS.get(v, COLORS[WALL])}  {RESET}" for v in row))
+        print("".join(f"{COLORS.get(value, COLORS[WALL])}{CELL_TEXT}{RESET}" for value in row))
     print()
 
 
@@ -137,56 +162,15 @@ def solve(grid, verbose=True):
     nodes, start, end = build_graph(grid)
     if start is None or end is None:
         raise ValueError("Maze needs both a start (2) and an end (3).")
-    path = dijkstra(start, end)
-    if path is None:
+    distances, previous = dijkstra(nodes, start)
+    if distances[end.pos] == INFINITY:
         print("No path exists.")
         print_grid(grid)
         return None
-    total = sum(a.edges[b] for a, b in zip(path, path[1:]))
+    path = build_path(nodes, previous, start, end)
     if verbose:
-        print(f"Graph has {len(nodes)} nodes. Shortest path: {total} moves")
-        print("Node path:", " -> ".join(str(n.pos) for n in path))
+        print(f"Graph has {len(nodes)} nodes. Shortest path: {distances[end.pos]} moves")
+        print("Node path:", " -> ".join(str(node.pos) for node in path))
     solved = highlight_path(grid, path)
     print_grid(solved)
     return solved
-
-
-if __name__ == "__main__":
-    example = [
-        [2, 1, 1, 1],
-        [1, 0, 1, 1],
-        [1, 0, 0, 1],
-        [0, 0, 0, 3],
-    ]
-    print("Small example:")
-    solve(example)
-
-    print("\nLarger example:")
-    bigger = [
-        [2, 1, 1, 0, 1, 1, 1, 1],
-        [0, 0, 1, 0, 1, 0, 0, 1],
-        [1, 1, 1, 1, 1, 0, 1, 1],
-        [1, 0, 0, 0, 0, 0, 1, 0],
-        [1, 1, 1, 1, 1, 1, 1, 0],
-        [0, 0, 0, 0, 0, 0, 1, 1],
-        [1, 1, 1, 1, 1, 0, 0, 1],
-        [1, 0, 0, 0, 1, 1, 1, 3],
-    ]
-    solve(bigger)
-
-    grid = [
-        [1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0],
-        [0, 1, 0, 1, 0, 0, 1, 1, 1, 1, 1],
-        [0, 1, 0, 1, 1, 0, 0, 0, 0, 0, 1],
-        [0, 1, 1, 0, 1, 0, 0, 0, 0, 0, 1],
-        [0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1],
-        [0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0],
-        [1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0],
-        [1, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0],
-        [1, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
-        [1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0],
-        [1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0],
-        [1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 3]
-    ]
-    print_maze(grid)
-    solve(grid)
