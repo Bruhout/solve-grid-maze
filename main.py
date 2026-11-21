@@ -21,7 +21,7 @@ COLORS = {
     ROUTE: "\033[46m",   # green
 }
 RESET = "\033[0m"
-
+INFINITY = float("inf")
 
 class Node:
     """A graph node that remembers exactly which grid cell it represents."""
@@ -81,7 +81,6 @@ def build_graph(grid):
     return nodes, start, end
 
 
-INFINITY = float("inf")
 
 
 def dijkstra(graph, start):
@@ -96,6 +95,7 @@ def dijkstra(graph, start):
     """
     distances = {position: INFINITY for position in graph}
     previous = {}
+    seen = set()
 
     distances[start.pos] = 0
     queue = [(0, start.pos)]  # (distance, position), smallest distance pops first
@@ -103,9 +103,10 @@ def dijkstra(graph, start):
     while queue:
         distance, position = heapq.heappop(queue)
 
-        # A shorter route to this node was already found, so skip this old entry
-        if distance > distances[position]:
+        # This node was already finalized via a shorter entry, so skip this old one
+        if position in seen:
             continue
+        seen.add(position)
 
         for neighbor, weight in graph[position].edges.items():
             new_distance = distance + weight
